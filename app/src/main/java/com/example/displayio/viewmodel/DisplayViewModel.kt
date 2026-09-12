@@ -28,6 +28,8 @@ data class SequenceInfo(val dir: File, val name: String, val addDate: Long)
 
 class DisplayViewModel(application: Application) : AndroidViewModel(application) {
 
+    private var socketReadJob: Job? = null
+
     var importedSequences by mutableStateOf<List<SequenceInfo>>(emptyList())
     var currentSequence by mutableStateOf<SequenceData?>(null)
     var currentDir by mutableStateOf<File?>(null)
@@ -50,6 +52,7 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
 
     init {
         loadImportedSequences()
+        startSocketReadLoop()
     }
 
     fun importZipFile(context: Context, uri: Uri) {
@@ -96,6 +99,48 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
             }
             SequenceInfo(dir, seqName, timestamp)
         }.sortedByDescending { it.addDate }
+    }
+
+    private fun startSocketReadLoop() {
+        socketReadJob?.cancel()
+        socketReadJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                try {
+                    // 连接 Ubuntu 宿主机的 socat 桥
+                    val socket = java.net.Socket()
+                    socket.connect(java.net.InetSocketAddress("10.0.3.2", 8080), 2000)
+                    val inputStream = socket.getInputStream()
+                    val buffer = ByteArray(4096)
+                    var readStr = ""
+
+                    withContext(Dispatchers.Main) {
+                        usbConnectionState = "已桥接"
+                    }
+
+                    // 持续读取 ESP32 传回的数据
+                    while (isActive && socket.isConnected) {
+                        val len = inputStream.read(buffer)
+                        if (len > 0) {
+                            readStr += String(buffer, 0, len, Charsets.UTF_8)
+                            while (readStr.contains("\n")) {
+                                val newlineIdx = readStr.indexOf("\n")
+                                val line = readStr.substring(0, newlineIdx).trim()
+                                readStr = readStr.substring(newlineIdx + 1)
+                                if (line.isNotEmpty()) {
+                                    // 💡 直接复用原有的解析逻辑！
+                                    processSerialLine(line)
+                                }
+                            }
+                        } else if (len == -1) {
+                            break // 连接断开
+                        }
+                    }
+                    socket.close()
+                } catch (e: Exception) {
+                    delay(3000)
+                }
+            }
+        }
     }
 
     fun deleteSequence(info: SequenceInfo) {
